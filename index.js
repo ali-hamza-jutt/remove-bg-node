@@ -4,27 +4,36 @@ import fs from 'fs';
 import path from 'path';
 import express from 'express';
 import dotenv from 'dotenv';
-
+import crypto from 'crypto';
 
 dotenv.config();
-
 
 // AWS S3 Configuration
 const s3 = new AWS.S3({
   accessKeyId: process.env.AMAZON_ACCESS_KEY,
   secretAccessKey: process.env.AMAZON_SECRET_ACCESS_KEY,
-  region:process.env.AMAZON_REGION,
+  region: process.env.AMAZON_REGION,
 });
 
 const BUCKET_NAME = process.env.AMAZON_BUCKET_NAME;
-const LOCAL_FOLDER = path.join(path.resolve(), "output");
-console.log(BUCKET_NAME)
-// Ensure the output directory exists
-if (!fs.existsSync(LOCAL_FOLDER)) {
-  fs.mkdirSync(LOCAL_FOLDER);
-}
+const INPUT_FOLDER = path.join(path.resolve(), "input");
+const OUTPUT_FOLDER = path.join(path.resolve(), "output");
 
-// Function to download the image from S3
+// Ensure directories exist
+[INPUT_FOLDER, OUTPUT_FOLDER].forEach(folder => {
+  if (!fs.existsSync(folder)) {
+    fs.mkdirSync(folder);
+  }
+});
+
+// Helper function to generate unique filenames
+const generateUniqueName = (index) => {
+  const date = new Date().toISOString().split('T')[0];
+  const randomId = crypto.randomBytes(4).toString('hex');
+  return `${date}_${index}_${randomId}.png`;
+};
+
+// Function to download an image from S3
 const downloadFromS3 = (key) => {
   return new Promise((resolve, reject) => {
     const params = {
@@ -33,17 +42,17 @@ const downloadFromS3 = (key) => {
     };
     s3.getObject(params, (err, data) => {
       if (err) reject(err);
-      else resolve(data.Body);
+      else resolve({ key, buffer: data.Body });
     });
   });
 };
 
-// Function to upload image to S3
+// Function to upload an image to S3
 const uploadToS3 = (key, buffer) => {
   return new Promise((resolve, reject) => {
     const params = {
       Bucket: BUCKET_NAME,
-      Key: key,  // You can modify the key if you want to change the filename on S3
+      Key: key,
       Body: buffer,
       ContentType: "image/png",
     };
@@ -54,7 +63,7 @@ const uploadToS3 = (key, buffer) => {
   });
 };
 
-// Function to remove background using rembg
+// Function to remove background from an image
 const removeBackground = (inputPath, outputPath) => {
   return new Promise((resolve, reject) => {
     execFile("rembg", ["i", inputPath, outputPath], (error) => {
@@ -64,33 +73,50 @@ const removeBackground = (inputPath, outputPath) => {
   });
 };
 
-// Main function
-const processImage = async (imageKey) => {
+// Main function to process images in bulk
+const processImagesInBulk = async (imageKeys) => {
   try {
-    console.log(`Downloading image: ${imageKey}`);
+    const processedImages = [];
 
-    // Step 1: Download image from S3
-    const imageBuffer = await downloadFromS3(imageKey);
-    const inputPath = path.join(LOCAL_FOLDER, "input.png");
-    const outputPath = path.join(LOCAL_FOLDER, "output.png");
+    // Step 1: Download all images from S3
+    console.log("Downloading images...");
+    const downloadPromises = imageKeys.map(key => downloadFromS3(key));
+    const images = await Promise.all(downloadPromises);
 
-    // Step 2: Save image to a local file
-    fs.writeFileSync(inputPath, imageBuffer);
-    console.log(`Image saved locally at ${inputPath}`);
+    // Step 2: Save images locally, process them, and upload back to S3
+    for (let i = 0; i < images.length; i++) {
+      const { key, buffer } = images[i];
 
-    // Step 3: Remove background
-    console.log(`Removing background for ${inputPath}`);
-    await removeBackground(inputPath, outputPath);
+      // Rename and save the input image
+      const renamedInputName = generateUniqueName(i + 1);
+      const inputPath = path.join(INPUT_FOLDER, renamedInputName);
+      const outputPath = path.join(OUTPUT_FOLDER, path.basename(key));
 
-    // Step 4: Upload the processed image back to S3
-    const outputBuffer = fs.readFileSync(outputPath);
-    console.log(`Uploading processed image to S3 with key: ${imageKey}`);
-    await uploadToS3(imageKey, outputBuffer); // Uploading back to the same key
+      // Save the downloaded image locally with a new name
+      fs.writeFileSync(inputPath, buffer);
+      console.log(`Saved renamed input image locally: ${inputPath}`);
 
-    console.log(`Background removed and image uploaded to S3.`);
-    return `https://${BUCKET_NAME}.s3.amazonaws.com/${imageKey}`; // URL to the uploaded image
+      // Remove background
+      console.log(`Removing background for: ${inputPath}`);
+      await removeBackground(inputPath, outputPath);
+
+      // Upload the processed image back to its original key
+      const processedBuffer = fs.readFileSync(outputPath);
+      console.log(`Uploading processed image back to S3: ${key}`);
+      await uploadToS3(key, processedBuffer);
+
+      // Upload the renamed input image to a new key
+      const newInputKey = `renamed-inputs/${renamedInputName}`;
+      console.log(`Uploading renamed input image to new S3 key: ${newInputKey}`);
+      await uploadToS3(newInputKey, buffer);
+
+      processedImages.push({ originalKey: key, newInputKey });
+    }
+
+    console.log("All images processed successfully.");
+    return processedImages;
   } catch (error) {
-    console.error("Error processing image:", error);
+    console.error("Error processing images in bulk:", error);
     throw error;
   }
 };
@@ -99,17 +125,17 @@ const processImage = async (imageKey) => {
 const app = express();
 app.use(express.json());
 
-// API endpoint
-app.post('/process-image', async (req, res) => {
-  const imageKey = "product-1723456189240"; // Example key
+// API endpoint for bulk image processing
+app.post('/process-images', async (req, res) => {
+  const { imageKeys } = req.body; // Expecting an array of image keys
 
-  if (!imageKey) {
-    return res.status(400).json({ error: "Image key is required." });
+  if (!Array.isArray(imageKeys) || imageKeys.length === 0) {
+    return res.status(400).json({ error: "An array of image keys is required." });
   }
 
   try {
-    const imageUrl = await processImage(imageKey);
-    res.json({ message: "Image processed and uploaded to S3 successfully.", imageUrl });
+    const result = await processImagesInBulk(imageKeys);
+    res.json({ message: "Images processed successfully.", result });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
