@@ -26,11 +26,9 @@ const OUTPUT_FOLDER = path.join(path.resolve(), "output");
   }
 });
 
-// Helper function to generate unique filenames
-const generateUniqueName = (index) => {
-  const date = new Date().toISOString().split('T')[0];
-  const randomId = crypto.randomBytes(4).toString('hex');
-  return `${date}_${index}_${randomId}.png`;
+// Function to generate a new key for renamed images
+const generateRenamedKey = (originalKey) => {
+  return `${originalKey}-backup`;
 };
 
 // Function to download an image from S3
@@ -104,9 +102,9 @@ const processImagesInBulk = async (imageKeys) => {
       const { key, buffer } = images[i];
 
       // Rename and save the input image
-      const renamedInputName = generateUniqueName(i + 1);
-      const inputPath = path.join(INPUT_FOLDER, renamedInputName);
-      const outputPath = path.join(OUTPUT_FOLDER, path.basename(key));
+      const renamedKey = generateRenamedKey(key);
+      const inputPath = path.join(INPUT_FOLDER, `${path.basename(renamedKey)}.png`);
+      const outputPath = path.join(OUTPUT_FOLDER, `${path.basename(key)}.png`);
 
       // Save the downloaded image locally with a new name
       fs.writeFileSync(inputPath, buffer);
@@ -121,10 +119,9 @@ const processImagesInBulk = async (imageKeys) => {
       processedUploads.push({ key, buffer: processedBuffer });
 
       // Prepare upload for renamed input image
-      const newInputKey = `renamed-inputs/${renamedInputName}`;
-      renamedUploads.push({ key: newInputKey, buffer });
+      renamedUploads.push({ key: renamedKey, buffer });
 
-      processedImages.push({ originalKey: key, newInputKey });
+      processedImages.push({ originalKey: key, newInputKey: renamedKey });
     }
 
     // Step 3: Upload images in batch
