@@ -73,6 +73,18 @@ const removeBackground = (inputPath, outputPath) => {
   });
 };
 
+// Function to batch upload images to S3
+const uploadBatchToS3 = (uploads) => {
+  return Promise.all(
+    uploads.map(({ key, buffer }) =>
+      uploadToS3(key, buffer).catch(err => {
+        console.error(`Failed to upload ${key}:`, err);
+        throw err;
+      })
+    )
+  );
+};
+
 // Main function to process images in bulk
 const processImagesInBulk = async (imageKeys) => {
   try {
@@ -83,7 +95,11 @@ const processImagesInBulk = async (imageKeys) => {
     const downloadPromises = imageKeys.map(key => downloadFromS3(key));
     const images = await Promise.all(downloadPromises);
 
-    // Step 2: Save images locally, process them, and upload back to S3
+    // Prepare upload data
+    const renamedUploads = [];
+    const processedUploads = [];
+
+    // Step 2: Save images locally, process them, and prepare them for upload
     for (let i = 0; i < images.length; i++) {
       const { key, buffer } = images[i];
 
@@ -100,20 +116,25 @@ const processImagesInBulk = async (imageKeys) => {
       console.log(`Removing background for: ${inputPath}`);
       await removeBackground(inputPath, outputPath);
 
-      // Upload the processed image back to its original key
+      // Prepare upload for processed image
       const processedBuffer = fs.readFileSync(outputPath);
-      console.log(`Uploading processed image back to S3: ${key}`);
-      await uploadToS3(key, processedBuffer);
+      processedUploads.push({ key, buffer: processedBuffer });
 
-      // Upload the renamed input image to a new key
+      // Prepare upload for renamed input image
       const newInputKey = `renamed-inputs/${renamedInputName}`;
-      console.log(`Uploading renamed input image to new S3 key: ${newInputKey}`);
-      await uploadToS3(newInputKey, buffer);
+      renamedUploads.push({ key: newInputKey, buffer });
 
       processedImages.push({ originalKey: key, newInputKey });
     }
 
-    console.log("All images processed successfully.");
+    // Step 3: Upload images in batch
+    console.log("Uploading renamed input images in batch...");
+    await uploadBatchToS3(renamedUploads);
+
+    console.log("Uploading processed images in batch...");
+    await uploadBatchToS3(processedUploads);
+
+    console.log("All images processed and uploaded successfully.");
     return processedImages;
   } catch (error) {
     console.error("Error processing images in bulk:", error);
