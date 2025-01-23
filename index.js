@@ -5,6 +5,7 @@ import path from 'path';
 import express from 'express';
 import dotenv from 'dotenv';
 
+
 dotenv.config();
 
 // AWS S3 Configuration
@@ -171,6 +172,27 @@ const processImagesInBulk = async (imageKeys) => {
   }
 };
 
+// Function to delete objects in batch from S3
+export const deleteBatchFromS3 = async (keys) => {
+  console.log('Keys to delete:', keys); // Add this
+  const params = {
+    Bucket: BUCKET_NAME,
+    Delete: {
+      Objects: keys.map((key) => ({ Key: key })),
+    },
+  };
+
+  try {
+    const result = await s3.deleteObjects(params).promise();
+    console.log('Delete result:', result); // Add this
+    return result;
+  } catch (error) {
+    console.error('Error deleting objects:', error);
+    throw error;
+  }
+};
+
+
 // Set up Express app
 const app = express();
 app.use(express.json());
@@ -190,6 +212,22 @@ app.post('/process-images', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+app.delete('/delete-images', async (req, res) => {
+  const { imageKeys } = req.body; // Expecting an array of image keys
+
+  if (!Array.isArray(imageKeys) || imageKeys.length === 0) {
+    return res.status(400).json({ error: 'An array of image keys is required.' });
+  }
+
+  try {
+    const result = await deleteBatchFromS3(imageKeys);
+    res.json({ message: 'Images deleted successfully.', result });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 
 // Start the server
 const PORT = 3000;
