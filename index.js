@@ -4,7 +4,6 @@ import fs from 'fs';
 import path from 'path';
 import express from 'express';
 import dotenv from 'dotenv';
-import crypto from 'crypto';
 
 dotenv.config();
 
@@ -15,12 +14,16 @@ const s3 = new AWS.S3({
   region: process.env.AMAZON_REGION,
 });
 
+const cloudfront = new AWS.CloudFront(); // CloudFront client
+
 const BUCKET_NAME = process.env.AMAZON_BUCKET_NAME;
-const INPUT_FOLDER = path.join(path.resolve(), "input");
-const OUTPUT_FOLDER = path.join(path.resolve(), "output");
+const CLOUDFRONT_DISTRIBUTION_ID = process.env.CLOUDFRONT_DISTRIBUTIONS_ID;
+
+const INPUT_FOLDER = path.join(path.resolve(), 'input');
+const OUTPUT_FOLDER = path.join(path.resolve(), 'output');
 
 // Ensure directories exist
-[INPUT_FOLDER, OUTPUT_FOLDER].forEach(folder => {
+[INPUT_FOLDER, OUTPUT_FOLDER].forEach((folder) => {
   if (!fs.existsSync(folder)) {
     fs.mkdirSync(folder);
   }
@@ -52,7 +55,7 @@ const uploadToS3 = (key, buffer) => {
       Bucket: BUCKET_NAME,
       Key: key,
       Body: buffer,
-      ContentType: "image/png",
+      ContentType: 'image/png',
     };
     s3.upload(params, (err, data) => {
       if (err) reject(err);
@@ -64,7 +67,7 @@ const uploadToS3 = (key, buffer) => {
 // Function to remove background from an image
 const removeBackground = (inputPath, outputPath) => {
   return new Promise((resolve, reject) => {
-    execFile("rembg", ["i", inputPath, outputPath], (error) => {
+    execFile('rembg', ['i', inputPath, outputPath], (error) => {
       if (error) reject(error);
       else resolve();
     });
@@ -75,7 +78,7 @@ const removeBackground = (inputPath, outputPath) => {
 const uploadBatchToS3 = (uploads) => {
   return Promise.all(
     uploads.map(({ key, buffer }) =>
-      uploadToS3(key, buffer).catch(err => {
+      uploadToS3(key, buffer).catch((err) => {
         console.error(`Failed to upload ${key}:`, err);
         throw err;
       })
@@ -83,58 +86,87 @@ const uploadBatchToS3 = (uploads) => {
   );
 };
 
+// Function to invalidate CloudFront cache
+const invalidateCloudFrontCache = (keys) => {
+  return new Promise((resolve, reject) => {
+    const cloudfront = new AWS.CloudFront({
+      accessKeyId: process.env.AMAZON_ACCESS_KEY,
+      secretAccessKey: process.env.AMAZON_SECRET_ACCESS_KEY,
+    });
+
+    const params = {
+      DistributionId: CLOUDFRONT_DISTRIBUTION_ID,
+      InvalidationBatch: {
+        CallerReference: `${Date.now()}`,
+        Paths: {
+          Quantity: keys.length,
+          Items: keys.map((key) => `/${key}`),
+        },
+      },
+    };
+
+    cloudfront.createInvalidation(params, (err, data) => {
+      if (err) {
+        console.error("CloudFront invalidation error:", err);
+        reject(err);
+      } else {
+        console.log("CloudFront invalidation created:");
+        console.log(`Invalidation ID: ${data.Invalidation.Id}`);
+        console.log(`Invalidation Status: ${data.Invalidation.Status}`);
+        resolve(data);
+      }
+    });
+  });
+};
+ 
+
 // Main function to process images in bulk
 const processImagesInBulk = async (imageKeys) => {
   try {
     const processedImages = [];
 
-    // Step 1: Download all images from S3
-    console.log("Downloading images...");
-    const downloadPromises = imageKeys.map(key => downloadFromS3(key));
+    console.log('Downloading images...');
+    const downloadPromises = imageKeys.map((key) => downloadFromS3(key));
     const images = await Promise.all(downloadPromises);
 
-    // Prepare upload data
     const renamedUploads = [];
     const processedUploads = [];
 
-    // Step 2: Save images locally, process them, and prepare them for upload
     for (let i = 0; i < images.length; i++) {
       const { key, buffer } = images[i];
-
-      // Rename and save the input image
       const renamedKey = generateRenamedKey(key);
       const inputPath = path.join(INPUT_FOLDER, `${path.basename(renamedKey)}.png`);
       const outputPath = path.join(OUTPUT_FOLDER, `${path.basename(key)}.png`);
 
-      // Save the downloaded image locally with a new name
       fs.writeFileSync(inputPath, buffer);
       console.log(`Saved renamed input image locally: ${inputPath}`);
 
-      // Remove background
-      console.log(`Removing background for: ${inputPath}`);
       await removeBackground(inputPath, outputPath);
 
-      // Prepare upload for processed image
       const processedBuffer = fs.readFileSync(outputPath);
       processedUploads.push({ key, buffer: processedBuffer });
-
-      // Prepare upload for renamed input image
       renamedUploads.push({ key: renamedKey, buffer });
 
       processedImages.push({ originalKey: key, newInputKey: renamedKey });
     }
 
-    // Step 3: Upload images in batch
-    console.log("Uploading renamed input images in batch...");
+    console.log('Uploading renamed input images...');
     await uploadBatchToS3(renamedUploads);
 
-    console.log("Uploading processed images in batch...");
+    console.log('Uploading processed images...');
     await uploadBatchToS3(processedUploads);
 
-    console.log("All images processed and uploaded successfully.");
+    console.log('Invalidating CloudFront cache...');
+    const invalidationPaths = [
+      ...renamedUploads.map(({ key }) => key),
+      ...processedUploads.map(({ key }) => key),
+    ];
+    await invalidateCloudFrontCache(invalidationPaths);
+
+    console.log('All images processed, uploaded, and cache invalidated successfully.');
     return processedImages;
   } catch (error) {
-    console.error("Error processing images in bulk:", error);
+    console.error('Error processing images in bulk:', error);
     throw error;
   }
 };
@@ -148,12 +180,12 @@ app.post('/process-images', async (req, res) => {
   const { imageKeys } = req.body; // Expecting an array of image keys
 
   if (!Array.isArray(imageKeys) || imageKeys.length === 0) {
-    return res.status(400).json({ error: "An array of image keys is required." });
+    return res.status(400).json({ error: 'An array of image keys is required.' });
   }
 
   try {
     const result = await processImagesInBulk(imageKeys);
-    res.json({ message: "Images processed successfully.", result });
+    res.json({ message: 'Images processed successfully.', result });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
