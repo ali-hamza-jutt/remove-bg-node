@@ -1,8 +1,5 @@
-import AWS from 'aws-sdk';
-import { execFile } from 'child_process';
-import fs from 'fs';
-import path from 'path';
 import express from 'express';
+<<<<<<< Updated upstream
 import dotenv from 'dotenv';
 import crypto from 'crypto';
 
@@ -138,11 +135,17 @@ const processImagesInBulk = async (imageKeys) => {
     throw error;
   }
 };
+=======
+import utilitiesScriptRoutes from './routes.js';
+
+
+>>>>>>> Stashed changes
 
 // Set up Express app
 const app = express();
 app.use(express.json());
 
+<<<<<<< Updated upstream
 // API endpoint for bulk image processing
 app.post('/process-images', async (req, res) => {
   const { imageKeys } = req.body; // Expecting an array of image keys
@@ -158,6 +161,9 @@ app.post('/process-images', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+=======
+app.use('/api/scripts', utilitiesScriptRoutes);
+>>>>>>> Stashed changes
 
 // Start the server
 const PORT = 3000;
